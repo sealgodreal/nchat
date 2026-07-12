@@ -4,12 +4,13 @@ const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
 const app = express();
 app.use(cors());
-app.use(express.json({ limit: '15mb' }));
+app.use(express.json({ limit: '40mb' }));
 const PORT = process.env.PORT || 3001;
 const INACTIVITY_LIMIT_MS = 15 * 60 * 1000;
 const users = new Map();
 const sessions = new Map();
 let messages = [];
+const callSignals = new Map();
 
 function now() {
   return Date.now();
@@ -65,6 +66,7 @@ function sweep() {
   for (const [username, u] of users) {
     if (u.lastActive < cutoff) {
       users.delete(username);
+      callSignals.delete(username);
       for (const other of users.values()) {
         other.friends.delete(username);
       }
@@ -76,6 +78,13 @@ function sweep() {
     if (!users.has(m.from) || !users.has(m.to)) return false;
     return true;
   });
+
+  const signalCutoff = now() - 30 * 1000;
+  for (const [username, list] of callSignals) {
+    const kept = list.filter((s) => s.ts >= signalCutoff && users.has(username));
+    if (kept.length) callSignals.set(username, kept);
+    else callSignals.delete(username);
+  }
 }
 
 setInterval(sweep, 5000);
@@ -210,6 +219,52 @@ app.get('/receive', requireAuth, (req, res) => {
       ciphertext: m.ciphertext,
       iv: m.iv,
       ts: m.ts,
+    })),
+  });
+});
+
+const SIGNAL_TYPES = new Set(['offer', 'answer', 'ice', 'hangup', 'busy', 'ringing']);
+
+app.post('/call/signal', requireAuth, (req, res) => {
+  const { to, type, data, callId } = req.body || {};
+  if (typeof to !== 'string' || !SIGNAL_TYPES.has(type) || typeof callId !== 'string') {
+    return res.status(400).json({ error: 'to, valid type, and callId are required.' });
+  }
+  if (!users.has(to)) {
+    return res.status(404).json({ error: 'Recipient not found (may be offline/expired).' });
+  }
+  const me = users.get(req.username);
+  if (!me.friends.has(to)) {
+    return res.status(403).json({ error: 'You must both be added as friends to call.' });
+  }
+
+  const signal = {
+    id: crypto.randomUUID(),
+    from: req.username,
+    type,
+    data: data ?? null,
+    callId,
+    ts: now(),
+  };
+
+  if (!callSignals.has(to)) callSignals.set(to, []);
+  callSignals.get(to).push(signal);
+
+  res.json({ ok: true });
+});
+
+app.get('/call/poll', requireAuth, (req, res) => {
+  const pending = callSignals.get(req.username) || [];
+  callSignals.set(req.username, []);
+  res.json({
+    serverTime: now(),
+    signals: pending.map((s) => ({
+      id: s.id,
+      from: s.from,
+      type: s.type,
+      data: s.data,
+      callId: s.callId,
+      ts: s.ts,
     })),
   });
 });
