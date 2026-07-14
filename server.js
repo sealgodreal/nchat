@@ -306,6 +306,19 @@ app.get('/history', requireAuth, (req, res) => {
   });
 });
 
+app.get('/session', requireAuth, (req, res) => {
+  const user = stmt.getUser.get(req.username);
+
+  if (!user) {
+    return res.status(410).json({ error: 'Your account has expired.' });
+  }
+
+  res.json({
+    token: req.headers['x-session-token'],
+    user: publicUser(user)
+  });
+});
+
 app.get('/', (req, res) => {
   res.json({ status: 'ok', users: stmt.countUsers.get().c, messages: stmt.countMessages.get().c });
 });
